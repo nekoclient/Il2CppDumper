@@ -39,16 +39,27 @@ namespace Il2CppDumper
                 }
             }
 
-            if (args.Length > 2)
+            if (args.Length < 2)
             {
                 ShowHelp(AppDomain.CurrentDomain.FriendlyName);
                 return;
             }
 
-            if (args.Length == 2)
+            var version = "2018.4.9f1";
+            var mode = 3;
+
+            if (args.Length >= 2)
             {
                 var file1 = File.ReadAllBytes(args[0]);
                 var file2 = File.ReadAllBytes(args[1]);
+                if (args.Length > 2)
+                {
+                    version = args[2];
+                }
+                if (args.Length > 3)
+                {
+                    mode = Convert.ToInt32(args[3]);
+                }
                 if (BitConverter.ToUInt32(file1, 0) == 0xFAB11BAF)
                 {
                     il2cppBytes = file2;
@@ -82,22 +93,23 @@ namespace Il2CppDumper
                     return;
                 }
             }
-            try
+
+            //try
             {
-                if (Init(il2cppBytes, metadataBytes))
+                if (Init(il2cppBytes, metadataBytes, version, mode))
                 {
                     Dump();
                 }
             }
-            catch (Exception e)
+            /*catch (Exception e)
             {
                 Console.WriteLine(e);
-            }
+            }*/
             Console.WriteLine("Press any key to exit...");
             Console.ReadKey(true);
         }
 
-        private static bool Init(byte[] il2cppBytes, byte[] metadataBytes)
+        private static bool Init(byte[] il2cppBytes, byte[] metadataBytes, string stringVersion, int modeKey)
         {
             var sanity = BitConverter.ToUInt32(metadataBytes, 0);
             if (sanity != 0xFAB11BAF)
@@ -108,8 +120,6 @@ namespace Il2CppDumper
             var metadataVersion = BitConverter.ToInt32(metadataBytes, 4);
             if (metadataVersion == 24)
             {
-                Console.WriteLine("Input Unity version: ");
-                var stringVersion = Console.ReadLine();
                 try
                 {
                     var versionSplit = Array.ConvertAll(Regex.Replace(stringVersion, @"\D", ".").Split(new[] { "." }, StringSplitOptions.RemoveEmptyEntries), int.Parse);
@@ -187,8 +197,6 @@ namespace Il2CppDumper
                     break;
             }
 
-            Console.WriteLine("Select Mode: 1.Manual 2.Auto 3.Auto(Plus) 4.Auto(Symbol)");
-            var modeKey = Console.ReadKey(true);
             var version = config.ForceIl2CppVersion ? config.ForceVersion : metadata.version;
             Console.WriteLine("Initializing il2cpp file...");
             if (isNSO)
@@ -211,16 +219,16 @@ namespace Il2CppDumper
                 il2cpp = new Macho64(new MemoryStream(il2cppBytes), version, metadata.maxMetadataUsages);
             else
                 il2cpp = new Macho(new MemoryStream(il2cppBytes), version, metadata.maxMetadataUsages);
-            if (modeKey.KeyChar != '1')
+            if (modeKey != 1)
             {
                 Console.WriteLine("Searching...");
             }
             try
             {
                 bool flag;
-                switch (modeKey.KeyChar)
+                switch (modeKey)
                 {
-                    case '1': //Manual
+                    case 1: //Manual
                         Console.Write("Input CodeRegistration: ");
                         var codeRegistration = Convert.ToUInt64(Console.ReadLine(), 16);
                         Console.Write("Input MetadataRegistration: ");
@@ -228,13 +236,13 @@ namespace Il2CppDumper
                         il2cpp.Init(codeRegistration, metadataRegistration);
                         flag = true;
                         break;
-                    case '2': //Auto
+                    case 2: //Auto
                         flag = il2cpp.Search();
                         break;
-                    case '3': //Auto(Plus)
+                    case 3: //Auto(Plus)
                         flag = il2cpp.PlusSearch(metadata.methodDefs.Count(x => x.methodIndex >= 0), metadata.typeDefs.Length);
                         break;
-                    case '4': //Auto(Symbol)
+                    case 4: //Auto(Symbol)
                         flag = il2cpp.SymbolSearch();
                         break;
                     default:
@@ -253,6 +261,7 @@ namespace Il2CppDumper
 
         private static void Dump()
         {
+#if DUMPCS
             var writer = new StreamWriter(new FileStream("dump.cs", FileMode.Create), new UTF8Encoding(false));
             Console.WriteLine("Dumping...");
             //Script
@@ -667,6 +676,7 @@ namespace Il2CppDumper
             writer.Close();
             scriptwriter.Close();
             Console.WriteLine("Done !");
+#endif
             //DummyDll
             if (config.DummyDll)
             {

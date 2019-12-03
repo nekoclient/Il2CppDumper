@@ -17,6 +17,35 @@ namespace Il2CppDumper
         private Dictionary<int, MethodDefinition> methodDefinitionDic = new Dictionary<int, MethodDefinition>();
         private Dictionary<long, GenericParameter> genericParameterDic = new Dictionary<long, GenericParameter>();
 
+        private static ModuleDefinition ms_decryptModule = null;
+
+        MethodReference GetTypeMethod(ModuleDefinition targetModule)
+        {
+            //if (ms_getTypeFromRuntimeHandleMethod == null)
+            //{
+                var typeType = targetModule.Import(typeof(Type));
+                typeType.Resolve();
+                var ms_getTypeFromRuntimeHandleMethod = targetModule.Import(typeof(Type).GetMethod("GetTypeFromHandle"));
+                ms_getTypeFromRuntimeHandleMethod.Resolve();
+                //ms_getTypeFromRuntimeHandleMethod = targetModule.Import(typeType.Resolve().Methods.Single(x => x.Name == "GetTypeFromHandle"));
+            //}
+
+            return ms_getTypeFromRuntimeHandleMethod;
+        }
+
+        MethodReference GetDecryptMethod(ModuleDefinition targetModule)
+        {
+            if (ms_decryptModule == null)
+            {
+                ms_decryptModule = ModuleDefinition.ReadModule("..\\NekoClient-Steam\\Helpers.dll");
+            }
+            var typ = ms_decryptModule.Types.Single(t => t.FullName == "Helpers.RuntimeCaller");
+            var invoke = typ.Methods.Single(m => m.Name == "Invoke");
+
+            targetModule.Import(typ);
+
+            return targetModule.Import(invoke);
+        }
 
         public DummyAssemblyCreator(Metadata metadata, Il2Cpp il2cpp)
         {
@@ -36,8 +65,14 @@ namespace Il2CppDumper
             //创建程序集，同时创建所有类
             foreach (var imageDef in metadata.imageDefs)
             {
-                var assemblyName = new AssemblyNameDefinition(metadata.GetStringFromIndex(imageDef.nameIndex).Replace(".dll", ""), new Version("3.7.1.6"));
-                var assemblyDefinition = AssemblyDefinition.CreateAssembly(assemblyName, metadata.GetStringFromIndex(imageDef.nameIndex), moduleParameters);
+                var namey = metadata.GetStringFromIndex(imageDef.nameIndex).Replace(".dll", "");
+                if (namey == "mscorlib")
+                {
+                    //continue;
+                    namey = "mscorlib2";
+                }
+                var assemblyName = new AssemblyNameDefinition(namey, new Version("3.7.1.6"));
+                var assemblyDefinition = AssemblyDefinition.CreateAssembly(assemblyName, metadata.GetStringFromIndex(imageDef.nameIndex).Replace("mscorlib", "mscorlib2"), moduleParameters);
                 resolver.Register(assemblyDefinition);
                 Assemblies.Add(assemblyDefinition);
                 var moduleDefinition = assemblyDefinition.MainModule;
@@ -128,6 +163,35 @@ namespace Il2CppDumper
                             fieldDefinition.CustomAttributes.Add(customAttribute);
                         }
                     }
+
+                    // stuff_ptr field
+                    //foreach (var cls in typeDefinition)
+                    if (typeDefinition.Name != "<Module>" && !typeDefinition.IsInterface)
+                    {
+                        var cls = typeDefinition;
+                        var type = cls.BaseType?.Resolve();
+                        var isMostDerived = true;
+
+                        while (type != null)
+                        {
+                            if (type.Module.Name == cls.Module.Name)
+                            {
+                                isMostDerived = false;
+                                break;
+                            }
+
+                            type = type.BaseType?.Resolve();
+                        }
+
+                        if (!cls.IsValueType && isMostDerived)
+                        {
+                            var fd = new FieldDefinition("stuff_ptr", FieldAttributes.Public, typeDefinition.Module.Import(typeof(IntPtr)).Resolve());
+                            typeDefinition.Fields.Add(fd);
+
+                            //cls.Fields.Add(new FieldDefUser("stuff_ptr", new FieldSig(engine.Module.CorLibTypes.IntPtr), FieldAttributes.Public));
+                        }
+                    }
+
                     //method
                     var methodEnd = typeDef.methodStart + typeDef.method_count;
                     for (var i = typeDef.methodStart; i < methodEnd; ++i)
@@ -135,14 +199,16 @@ namespace Il2CppDumper
                         var methodDef = metadata.methodDefs[i];
                         var methodReturnType = il2cpp.types[methodDef.returnType];
                         var methodName = metadata.GetStringFromIndex(methodDef.nameIndex);
+
+                        /*if (methodName == ".ctor" && methodDef.parameterCount <= 1)
+                        {
+                            continue;
+                        }*/
+
                         var methodDefinition = new MethodDefinition(methodName, (MethodAttributes)methodDef.flags, typeDefinition.Module.Import(typeof(void)));
                         typeDefinition.Methods.Add(methodDefinition);
                         methodDefinition.ReturnType = GetTypeReference(methodDefinition, methodReturnType);
-                        if (methodDefinition.HasBody && typeDefinition.BaseType?.FullName != "System.MulticastDelegate")
-                        {
-                            var ilprocessor = methodDefinition.Body.GetILProcessor();
-                            ilprocessor.Append(ilprocessor.Create(OpCodes.Nop));
-                        }
+
                         methodDefinitionDic.Add(i, methodDefinition);
                         //method parameter
                         for (var j = 0; j < methodDef.parameterCount; ++j)
@@ -163,6 +229,70 @@ namespace Il2CppDumper
                                 }
                             }
                         }
+
+                        if (methodDefinition.HasBody && typeDefinition.BaseType?.FullName != "System.MulticastDelegate" && methodDefinition.Name != ".ctor")
+                        {
+                            var ilprocessor = methodDefinition.Body.GetILProcessor();
+                            //ilprocessor.Append(ilprocessor.Create(OpCodes.Nop));
+
+                            // HACKS FOR VRC IL2CPP C#-SIDE EXECUTION!
+                            ilprocessor.Append(ilprocessor.Create(OpCodes.Ldstr, methodDefinition.DeclaringType.FullName));
+                            ilprocessor.Append(ilprocessor.Create(OpCodes.Ldstr, methodDefinition.Name));
+                            ilprocessor.Append(ilprocessor.Create(methodDefinition.IsStatic ? OpCodes.Ldc_I4_1 : OpCodes.Ldc_I4_0));
+                            ilprocessor.Append(ilprocessor.Create(OpCodes.Ldtoken, (methodDefinition.ReturnType != null) ? methodDefinition.ReturnType : typeDefinition.Module.Import(typeof(void))));
+                            ilprocessor.Append(ilprocessor.Create(OpCodes.Call, GetTypeMethod(typeDefinition.Module)));
+
+                            var self = new ParameterDefinition[0];
+
+                            if (!methodDefinition.IsStatic)
+                            {
+                                self = new[] { new ParameterDefinition("self", ParameterAttributes.None, methodDefinition.DeclaringType) };
+                            }
+
+                            var defs = self.Concat(methodDefinition.Parameters).ToList();
+
+                            //var defs = methodDefinition.Parameters;
+
+                            ilprocessor.Append(ilprocessor.Create(OpCodes.Ldc_I4, defs.Count));
+                            ilprocessor.Append(ilprocessor.Create(OpCodes.Newarr, typeDefinition.Module.Import(typeof(Object))));
+
+                            int idx = 0;
+
+                            foreach (var def in defs)
+                            {
+                                ilprocessor.Append(ilprocessor.Create(OpCodes.Dup));
+                                ilprocessor.Append(ilprocessor.Create(OpCodes.Ldc_I4, idx));
+                                ilprocessor.Append(ilprocessor.Create(OpCodes.Ldarg, def));
+
+                                if (def.ParameterType.IsValueType)
+                                {
+                                    ilprocessor.Append(ilprocessor.Create(OpCodes.Box, def.ParameterType));
+                                }
+
+                                ilprocessor.Append(ilprocessor.Create(OpCodes.Stelem_Ref));
+
+                                idx++;
+                            }
+
+                            ilprocessor.Append(ilprocessor.Create(OpCodes.Call, GetDecryptMethod(typeDefinition.Module)));
+
+                            if (methodDefinition.ReturnType.Name != "Void")
+                            {
+                                ilprocessor.Append(ilprocessor.Create(methodDefinition.ReturnType.IsValueType ? OpCodes.Unbox_Any : OpCodes.Castclass, methodDefinition.ReturnType));
+                            }
+                            else
+                            {
+                                ilprocessor.Append(ilprocessor.Create(OpCodes.Pop));
+                            }
+
+                            ilprocessor.Append(ilprocessor.Create(OpCodes.Ret));
+                        }
+                        else if (methodDefinition.HasBody)
+                        {
+                            var ilprocessor = methodDefinition.Body.GetILProcessor();
+                            ilprocessor.Append(ilprocessor.Create(OpCodes.Ret));
+                        }
+
                         //补充泛型参数
                         if (methodDef.genericContainerIndex >= 0)
                         {
